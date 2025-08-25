@@ -8,12 +8,17 @@
     "start": "node index.js",
     "start:dev": "NODE_ENV=development node index.js"
   },
-  "dependencies": {
+"dependencies": {
   "cors": "^2.8.5",
   "express": "^4.19.2",
   "express-rate-limit": "^6.7.0",
   "helmet": "^6.2.0"
+},
+"engines": {
+  "node": ">=18.0.0"
 }
 
+
 }
+
 
