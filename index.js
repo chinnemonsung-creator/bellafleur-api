@@ -8,8 +8,13 @@
 const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
-const rateLimit = require('express-rate-limit');
+
+// แทนที่ 1 บรรทัดเดิม ด้วย 2 บรรทัดนี้
+const rateLimitLib = require('express-rate-limit');
+const rateLimit = rateLimitLib.default || rateLimitLib;
+
 const crypto = require('crypto');
+
 
 // ---------- CONFIG ----------
 const PORT = process.env.PORT || 3000;
