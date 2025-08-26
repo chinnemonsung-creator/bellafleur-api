@@ -1,6 +1,6 @@
 /**
  * Bellafleur-Benly Production API
- * Endpoints: /start-auth, /status, /dlt/callback, /renew-link
+ * Endpoints: /start-auth, /status, /dlt/callback, /renew-link, /config
  * Security: CORS allowlist, Helmet, Rate limit, Idempotency-Key
  * Storage: In-memory Map (แนะนำเปลี่ยนเป็น Redis เมื่อขึ้นจริง)
  */
@@ -9,18 +9,20 @@ const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
 
-// แทนที่ 1 บรรทัดเดิม ด้วย 2 บรรทัดนี้
+// แทนที่ 1 บรรทัดเดิม ด้วย 2 บรรทัดนี้ (รองรับ express-rate-limit v6/v7)
 const rateLimitLib = require('express-rate-limit');
 const rateLimit = rateLimitLib.default || rateLimitLib;
 
 const crypto = require('crypto');
 
-
 // ---------- CONFIG ----------
 const PORT = process.env.PORT || 3000;
 const NODE_ENV = process.env.NODE_ENV || 'production';
-const LINK_TTL_SEC = parseInt(process.env.LINK_TTL_SEC || '180', 10);      // 3 นาที
+const LINK_TTL_SEC = parseInt(process.env.LINK_TTL_SEC || '180', 10);       // 3 นาที
 const SESSION_TTL_SEC = parseInt(process.env.SESSION_TTL_SEC || '1800', 10); // 30 นาที
+
+// ใส่ LIFF ID ใน Environment Variables
+const LIFF_ID = process.env.LIFF_ID || ''; // เช่น "2007996035-kv9ZRMNL"
 
 // CORS allowlist
 const ALLOWED = (process.env.ALLOWED_ORIGINS || '')
@@ -73,7 +75,7 @@ app.use(limiterCommon);
  * sessions: Map<sid, {
  *   sid, status, step, txID, deep_link, issued_at, expires_at,
  *   attempt_no, last_seen, progress, result, history:[],
- *   idempotency: Map<idempotencyKey, {payload, ts}>, timers:{}
+ *   last_client_info?: {}, idempotency: Map<idempotencyKey, {payload, ts}>, timers:{}
  * }>
  */
 const sessions = new Map();
@@ -129,6 +131,28 @@ function clearTimers(s) {
   s.timers = {};
 }
 
+// --- UA helpers เพื่อชี้นำฝั่งหน้าเว็บว่าจะเปิด ThaiID อย่างไร ---
+function isLineUA(ua = '') {
+  return /Line\//i.test(ua) || /LIFF|linemyapp/i.test(ua);
+}
+function isIOSUA(ua = '') {
+  return /(iPhone|iPad|iPod|CriOS|FxiOS)/i.test(ua);
+}
+function pickOpenStrategy(ua = '') {
+  // ถ้าอยู่ใน LINE และมี LIFF_ID → แนะนำเปิดแบบ liff_external
+  if (isLineUA(ua) && LIFF_ID) return 'liff_external';
+  // นอก LINE: เปิดเป็นแท็บใหม่ (กันทับหน้า verify)
+  return 'new_tab';
+}
+function buildOpenHint(ua = '') {
+  return {
+    in_line: isLineUA(ua),
+    is_ios: isIOSUA(ua),
+    open_strategy: pickOpenStrategy(ua), // 'liff_external' | 'new_tab'
+    liff_id: LIFF_ID || null
+  };
+}
+
 // จำลอง booking หลัง callback (AHK จะทำจริงในโปรดักชัน)
 function simulateBooking(sid) {
   const s = sessions.get(sid);
@@ -178,6 +202,17 @@ function requireJson(req, res, next) {
 }
 app.use(requireJson);
 
+// ---------- (ใหม่) GET /config ----------
+// ให้หน้าเว็บรู้ liff_id และ hint ตาม UA ปัจจุบัน
+app.get('/config', (req, res) => {
+  const ua = req.get('User-Agent') || '';
+  return res.json({
+    ok: true,
+    liff_id: LIFF_ID || null,
+    hint: buildOpenHint(ua)
+  });
+});
+
 // ---------- 1) POST /start-auth ----------
 app.post('/start-auth', limiterStartRenew, (req, res) => {
   try {
@@ -196,6 +231,9 @@ app.post('/start-auth', limiterStartRenew, (req, res) => {
       }
     }
 
+    // เก็บ client_info ล่าสุดไว้ใน session (ช่วยตอน renew-link)
+    s.last_client_info = client_info || { ua: req.get('User-Agent') || '' };
+
     // TODO: เรียก service จริงเพื่อออก deep_link/txID
     s.attempt_no = attempt_no || (s.attempt_no + 1);
     s.status = 'AUTHING';
@@ -204,13 +242,15 @@ app.post('/start-auth', limiterStartRenew, (req, res) => {
     s.issued_at = now();
     s.expires_at = s.issued_at + (LINK_TTL_SEC * 1000);
     s.deep_link = newDeepLink(s.txID);
-    s.history.push({ ts: now(), ev:'START_AUTH', channel, client_info, click_token, idemKey });
+    const hint = buildOpenHint((client_info && client_info.ua) || req.get('User-Agent') || '');
+    s.history.push({ ts: now(), ev:'START_AUTH', channel, client_info, click_token, idemKey, hint });
 
     const payload = {
       ok: true,
       sid,
       status: s.status,
       step: s.step,
+      hint, // <<<< ให้หน้าเว็บใช้ตัดสินใจว่าจะเปิดด้วย LIFF external
       auth: {
         txID: s.txID,
         deep_link: s.deep_link,
@@ -313,13 +353,19 @@ app.post('/renew-link', limiterStartRenew, (req, res) => {
     s.expires_at = s.issued_at + (LINK_TTL_SEC * 1000);
     s.deep_link = newDeepLink(s.txID);
     clearTimers(s);
-    s.history.push({ ts: now(), ev:'RENEW_LINK' });
+
+    // ใช้ UA ล่าสุดที่รู้จัก (หรือ header ปัจจุบัน) เพื่อคำนวณ hint
+    const ua = (s.last_client_info && s.last_client_info.ua) || req.get('User-Agent') || '';
+    const hint = buildOpenHint(ua);
+
+    s.history.push({ ts: now(), ev:'RENEW_LINK', hint });
 
     return res.json({
       ok: true,
       sid,
       status: s.status,
       step: s.step,
+      hint, // <<<< ส่ง hint ให้ด้วย
       auth: {
         txID: s.txID,
         deep_link: s.deep_link,
