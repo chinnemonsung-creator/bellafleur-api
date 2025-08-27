@@ -422,12 +422,21 @@ app.use((err, req, res, next) => {
 });
 
 
-// เดิม:
-// app.listen(PORT, () => { ... });
-
-// ใหม่:
+// ---------- Start ----------
 const server = app.listen(PORT, () => {
   console.log(`API listening on http://0.0.0.0:${PORT} (env=${NODE_ENV})`);
 });
-process.on('SIGTERM', () => server.close(() => process.exit(0)));
-process.on('SIGINT',  () => server.close(() => process.exit(0)));
+
+// Graceful shutdown (รองรับ Render ส่งสัญญาณปิด)
+const shutdown = (signal) => {
+  console.log(`[${new Date().toISOString()}] ${signal} received; shutting down...`);
+  server.close(() => {
+    console.log('HTTP server closed. Bye.');
+    process.exit(0);
+  });
+  // กันค้าง: บังคับออกถ้ายังไม่ปิดใน 10 วิ
+  setTimeout(() => process.exit(1), 10_000).unref();
+};
+
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT',  () => shutdown('SIGINT'));
