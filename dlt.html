@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>DLT Auth – Web Test</title>
+  <link href="https://fonts.googleapis.com/css2?family=Mitr:wght@300;400;600&display=swap" rel="stylesheet">
+  <style>
+    :root{ --bg:#0f1220; --card:#171a2b; --text:#e8ebff; --muted:#9aa4c8; --acc:#7cf; --ok:#5be49b; --warn:#ffd166; --err:#f86a6a; }
+    *{ box-sizing:border-box; }
+    body{ margin:0; font-family:'Mitr',system-ui,Segoe UI,Roboto,Arial; background:linear-gradient(180deg,#0f1220,#0b0e1a); color:var(--text); }
+    .wrap{ max-width:980px; margin:40px auto; padding:0 16px; }
+    .card{ background:var(--card); border:1px solid rgba(255,255,255,.06); border-radius:18px; padding:20px; box-shadow:0 10px 30px rgba(0,0,0,.25); }
+    h1{ font-size:28px; margin:0 0 12px; }
+    .row{ display:grid; grid-template-columns:1fr 1fr; gap:12px; }
+    label{ font-size:13px; color:var(--muted); display:block; margin-bottom:6px; }
+    input,button,select,textarea{ width:100%; border-radius:12px; border:1px solid rgba(255,255,255,.1); background:#0e1223; color:var(--text); padding:10px 12px; font-size:14px; }
+    input:focus,button:focus,select:focus,textarea:focus{ outline:2px solid var(--acc); outline-offset:2px; }
+    button{ cursor:pointer; background:#10233d; transition:.2s ease; }
+    button:hover{ transform:translateY(-1px); background:#133055; }
+    .grid{ display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:16px; }
+    .muted{ color:var(--muted); font-size:13px; }
+    .pill{ display:inline-block; padding:4px 10px; border-radius:999px; font-size:12px; }
+    .ok{ background:rgba(91,228,155,.1); color:var(--ok); border:1px solid rgba(91,228,155,.3); }
+    .warn{ background:rgba(255,209,102,.12); color:var(--warn); border:1px solid rgba(255,209,102,.3); }
+    .err{ background:rgba(248,106,106,.12); color:var(--err); border:1px solid rgba(248,106,106,.3); }
+    .mono{ font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; font-size:13px; }
+    a.deep{ color:#9ce1ff; word-break:break-all; }
+    .log{ height:180px; }
+    .foot{ margin-top:10px; font-size:12px; color:var(--muted); text-align:right; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="card">
+      <h1>DLT Auth – Web Test</h1>
+      <p class="muted">หน้าเทสต์สำหรับ Flow: <span class="mono">/start-auth → /status (poll) → /renew-link → /dlt/callback</span><br/>
+      ใช้ได้ทั้ง <b>Local</b> และ <b>Production</b> (ค่าเริ่มต้นคือโปรดักชัน)</p>
+
+      <div class="grid" style="margin-top:12px;">
+        <div>
+          <label>Base URL (API)</label>
+          <input id="baseUrl" value="https://api.bellafleur-benly.com" />
+        </div>
+        <div>
+          <label>SID (auto-generate ถ้าว่าง)</label>
+          <input id="sid" placeholder="เว้นว่างให้ระบบสร้างให้" />
+        </div>
+        <div>
+          <label>TX ID (อ่านอัตโนมัติหลัง start/renew)</label>
+          <input id="txid" readonly />
+        </div>
+        <div>
+          <label>TTL ล่าสุด (sec)</label>
+          <input id="ttl" readonly />
+        </div>
+      </div>
+
+      <div class="grid" style="margin:14px 0 10px;">
+        <button id="btnStart">1) Start Auth (POST /start-auth)</button>
+        <button id="btnStatus">2) เช็คสถานะ (GET /status)</button>
+        <button id="btnRenew">3) ต่ออายุลิงก์ (POST /renew-link)</button>
+        <button id="btnCallback">4) จำลอง Callback (POST /dlt/callback)</button>
+      </div>
+
+      <div class="row" style="margin-top:8px;">
+        <div>
+          <label>Deep Link / QR (เปิดไปแอป ThaiID)</label>
+          <div id="deepLinkBox" class="mono" style="min-height:40px;">
+            <a id="deepLink" href="#" class="deep" target="_blank"></a>
+          </div>
+          <div style="margin-top:6px;">
+            สถานะ: <span id="statusPill" class="pill warn">-</span>
+          </div>
+        </div>
+        <div>
+          <label>Logs</label>
+          <textarea id="logs" class="mono log" readonly></textarea>
+        </div>
+      </div>
+
+      <div class="foot">Tip: ถ้าเรียกจากเว็บทดสอบนี้แล้วติด CORS ให้เพิ่ม <span class="mono">http://localhost</span> หรือ <span class="mono">http://127.0.0.1</span> ลงใน <span class="mono">ALLOWED_ORIGINS</span> ของ Render</div>
+    </div>
+  </div>
+
+<script>
+(function(){
+  const $ = (id) => document.getElementById(id);
+  const log = (m) => { const t = new Date().toLocaleTimeString(); $('logs').value += `[${t}] ${m}\n`; $('logs').scrollTop = $('logs').scrollHeight; };
+  const setStatus = (s) => {
+    const pill = $('statusPill'); pill.textContent = s || '-';
+    pill.className = 'pill ' + (s==='SUCCESS' ? 'ok' : (s==='EXPIRED' || s==='ERROR' ? 'err' : 'warn'));
+  };
+  const guid = () => (crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).slice(2) + Date.now());
+
+  let pollTimer = null;
+
+  function getBase(){ return $('baseUrl').value.replace(/\/$/, ''); }
+  function getSid(){ let s = $('sid').value.trim(); if(!s){ s = guid(); $('sid').value = s; } return s; }
+
+  async function api(path, opts={}){
+    const url = getBase() + path;
+    const res = await fetch(url, opts);
+    const text = await res.text();
+    let json; try { json = JSON.parse(text); } catch { json = { raw:text }; }
+    if(!res.ok){ throw Object.assign(new Error('HTTP '+res.status), { status:res.status, body:json }); }
+    return json;
+  }
+
+  function updateFromAuth(auth){
+    if(!auth) return;
+    $('txid').value = auth.txID || '';
+    $('ttl').value = typeof auth.expires_in==='number' ? String(auth.expires_in) : '';
+    const a = $('deepLink');
+    a.textContent = auth.deep_link || '';
+    a.href = auth.deep_link || '#';
+  }
+
+  async function startAuth(){
+    const sid = getSid();
+    log(`POST /start-auth sid=${sid}`);
+    try{
+      const resp = await api('/start-auth', {
+        method:'POST',
+        headers:{ 'Content-Type':'application/json', 'Idempotency-Key': sid },
+        body: JSON.stringify({ sid, channel:'web', client_info:{ ua:navigator.userAgent } })
+      });
+      setStatus(resp.status); updateFromAuth(resp.auth);
+      log('ok: start-auth ' + JSON.stringify({ status:resp.status, txID: resp?.auth?.txID, ttl: resp?.auth?.expires_in }));
+      startPolling();
+    }catch(e){ log('ERR start-auth: '+ (e.body? JSON.stringify(e.body): e.message)); }
+  }
+
+  async function getStatus(){
+    const sid = getSid();
+    log(`GET /status sid=${sid}`);
+    try{
+      const resp = await api('/status?sid='+encodeURIComponent(sid));
+      setStatus(resp.status);
+      if(typeof resp.ttl==='number'){ $('ttl').value = String(resp.ttl); }
+      if(resp.progress){ log('progress: '+ JSON.stringify(resp.progress)); }
+      if(resp.result){ log('SUCCESS: '+ JSON.stringify(resp.result)); }
+      if(resp.status==='EXPIRED'){ log('Link expired – you can click RENEW'); }
+      if(resp.status==='SUCCESS'){ stopPolling(); }
+    }catch(e){ log('ERR status: '+ (e.body? JSON.stringify(e.body): e.message)); }
+  }
+
+  async function renew(){
+    const sid = getSid();
+    log(`POST /renew-link sid=${sid}`);
+    try{
+      const resp = await api('/renew-link', {
+        method:'POST', headers:{ 'Content-Type':'application/json' }, body: JSON.stringify({ sid })
+      });
+      setStatus(resp.status); updateFromAuth(resp.auth);
+      log('ok: renew ' + JSON.stringify({ status:resp.status, txID: resp?.auth?.txID, ttl: resp?.auth?.expires_in }));
+    }catch(e){ log('ERR renew: '+ (e.body? JSON.stringify(e.body): e.message)); }
+  }
+
+  async function callback(){
+    const sid = getSid(); const txID = $('txid').value.trim();
+    if(!txID){ log('ไม่มี txID ให้ callback (เริ่มด้วย Start หรือ Renew ก่อน)'); return; }
+    log(`POST /dlt/callback sid=${sid} txID=${txID}`);
+    try{
+      const resp = await api('/dlt/callback', {
+        method:'POST', headers:{ 'Content-Type':'application/json' }, body: JSON.stringify({ sid, txID, event:'AUTH_SUCCESS' })
+      });
+      log('ok: callback ' + JSON.stringify(resp));
+    }catch(e){ log('ERR callback: '+ (e.body? JSON.stringify(e.body): e.message)); }
+  }
+
+  function startPolling(){ stopPolling(); pollTimer = setInterval(async ()=>{
+    const sid = $('sid').value.trim(); if(!sid) return;
+    try{
+      const resp = await api('/status?sid='+encodeURIComponent(sid));
+      setStatus(resp.status);
+      if(typeof resp.ttl==='number'){ $('ttl').value = String(resp.ttl); }
+      if(resp.status==='AUTHING' && typeof resp.ttl==='number' && resp.ttl<=5){
+        log('TTL ใกล้หมด → auto renew'); await renew();
+      }
+      if(resp.status==='SUCCESS'){ log('Flow สำเร็จ'); stopPolling(); }
+    }catch(e){ log('poll ERR: '+ (e.body? JSON.stringify(e.body): e.message)); }
+  }, 1500); }
+  function stopPolling(){ if(pollTimer){ clearInterval(pollTimer); pollTimer=null; } }
+
+  $('btnStart').onclick = startAuth;
+  $('btnStatus').onclick = getStatus;
+  $('btnRenew').onclick = renew;
+  $('btnCallback').onclick = callback;
+})();
+</script>
+</body>
+</html>

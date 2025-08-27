@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="th">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Verify – Bellafleur-Benly</title>
+  <style>
+    body{font-family:system-ui,Segoe UI,Roboto,Arial; background:#0f1220; color:#e8ebff; margin:0;}
+    .wrap{max-width:680px;margin:40px auto;padding:0 16px}
+    .card{background:#151a2b;border:1px solid rgba(255,255,255,.08);border-radius:16px;padding:20px}
+    h1{margin:0 0 10px;font-size:22px}
+    label{display:block;margin:10px 0 6px;color:#9aa4c8}
+    input,button{width:100%;padding:10px 12px;border-radius:12px;border:1px solid rgba(255,255,255,.12);background:#0e1223;color:#e8ebff}
+    button{cursor:pointer;background:#123055}
+    button:hover{filter:brightness(1.15)}
+    .row{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+    .mono{font-family: ui-monospace,Menlo,Consolas,monospace;font-size:13px}
+    .muted{color:#9aa4c8;font-size:13px}
+    .pill{display:inline-block;padding:2px 10px;border-radius:999px;font-size:12px;margin-left:6px;border:1px solid}
+    .ok{color:#55e39a;border-color:rgba(85,227,154,.4);background:rgba(85,227,154,.08)}
+    .warn{color:#ffd166;border-color:rgba(255,209,102,.4);background:rgba(255,209,102,.08)}
+    .err{color:#f86a6a;border-color:rgba(248,106,106,.4);background:rgba(248,106,106,.08)}
+    a{color:#8fd3ff;word-break:break-all}
+    textarea{width:100%;height:140px}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="card">
+      <h1>ยืนยันตัวตน (DLT)</h1>
+      <p class="muted">Flow: <span class="mono">start-auth → status (poll) → (optional) renew-link → dlt/callback</span></p>
+
+      <label>Base URL</label>
+      <input id="baseUrl" value="https://api.bellafleur-benly.com" />
+
+      <div class="row">
+        <div>
+          <label>SID (ปล่อยว่างให้สร้างอัตโนมัติ)</label>
+          <input id="sid" placeholder="auto-generate if empty" />
+        </div>
+        <div>
+          <label>TX ID (อ่านอัตโนมัติ)</label>
+          <input id="txid" readonly />
+        </div>
+      </div>
+
+      <label>Deep link</label>
+      <div class="mono"><a id="deep" href="#" target="_blank"></a></div>
+
+      <div class="row" style="margin:12px 0;">
+        <button id="btnStart">เริ่มยืนยัน (POST /start-auth)</button>
+        <button id="btnStatus">เช็คสถานะ (GET /status)</button>
+        <button id="btnRenew">ต่ออายุลิงก์ (POST /renew-link)</button>
+        <button id="btnCallback">จำลอง Callback (POST /dlt/callback)</button>
+      </div>
+
+      <div class="muted">สถานะ: <span id="status" class="pill warn">-</span></div>
+
+      <label>Logs</label>
+      <textarea id="logs" class="mono" readonly></textarea>
+    </div>
+  </div>
+
+<script>
+(function(){
+  const $ = (id)=>document.getElementById(id);
+  const q = new URLSearchParams(location.search);
+  const log = (s)=>{ const t=new Date().toLocaleTimeString(); $('logs').value += `[${t}] ${s}\n`; $('logs').scrollTop=$('logs').scrollHeight; };
+  const setStatus = (s)=>{ const el=$('status'); el.textContent=s||'-'; el.className='pill '+(s==='SUCCESS'?'ok':(s==='ERROR'||s==='EXPIRED'?'err':'warn')); };
+  const guid = ()=> (crypto.randomUUID? crypto.randomUUID(): (Math.random().toString(36).slice(2)+Date.now()))
+
+  // init sid from query (?sid=...) or auto
+  if(q.get('sid')) $('sid').value = q.get('sid');
+
+  function getSid(){ let sid=$('sid').value.trim(); if(!sid){ sid = guid(); $('sid').value=sid; } return sid; }
+  function base(){ return $('baseUrl').value.replace(/\/$/, ''); }
+  async function api(path, opts={}){
+    const res = await fetch(base()+path, opts);
+    const txt = await res.text(); let json; try{ json = JSON.parse(txt); }catch{ json={ raw:txt }; }
+    if(!res.ok) throw Object.assign(new Error('HTTP '+res.status), { status:res.status, body:json });
+    return json;
+  }
+  function updateAuth(a){ if(!a) return; $('txid').value = a.txID||''; $('deep').textContent=a.deep_link||''; $('deep').href=a.deep_link||'#'; }
+
+  async function startAuth(){
+    const sid = getSid(); log('POST /start-auth sid='+sid);
+    try{
+      const resp = await api('/start-auth', { method:'POST', headers:{ 'Content-Type':'application/json', 'Idempotency-Key': sid }, body: JSON.stringify({ sid, channel:'web', client_info:{ ua:navigator.userAgent } }) });
+      setStatus(resp.status); updateAuth(resp.auth); log('ok start-auth → '+JSON.stringify({status:resp.status, ttl:resp?.auth?.expires_in, txID:resp?.auth?.txID}));
+    }catch(e){ log('ERR start-auth: '+(e.body? JSON.stringify(e.body): e.message)); }
+  }
+  async function getStatus(){
+    const sid = getSid(); log('GET /status sid='+sid);
+    try{ const resp = await api('/status?sid='+encodeURIComponent(sid)); setStatus(resp.status); if(typeof resp.ttl==='number') log('ttl='+resp.ttl); if(resp.result) log('result='+JSON.stringify(resp.result)); if(resp.progress) log('progress='+JSON.stringify(resp.progress)); }
+    catch(e){ log('ERR status: '+(e.body? JSON.stringify(e.body): e.message)); }
+  }
+  async function renew(){
+    const sid = getSid(); log('POST /renew-link sid='+sid);
+    try{ const resp = await api('/renew-link', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ sid }) }); setStatus(resp.status); updateAuth(resp.auth); log('ok renew → '+JSON.stringify({ttl:resp?.auth?.expires_in, txID:resp?.auth?.txID})); }
+    catch(e){ log('ERR renew: '+(e.body? JSON.stringify(e.body): e.message)); }
+  }
+  async function callback(){
+    const sid = getSid(); const tx = $('txid').value.trim(); if(!tx){ log('ไม่มี txID – กดเริ่มหรือ renew ก่อน'); return; }
+    log('POST /dlt/callback sid='+sid+' txID='+tx);
+    try{ const resp = await api('/dlt/callback', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ sid, txID: tx, event: 'AUTH_SUCCESS' }) }); log('ok callback '+JSON.stringify(resp)); }
+    catch(e){ log('ERR callback: '+(e.body? JSON.stringify(e.body): e.message)); }
+  }
+
+  $('btnStart').onclick = startAuth;
+  $('btnStatus').onclick = getStatus;
+  $('btnRenew').onclick = renew;
+  $('btnCallback').onclick = callback;
+})();
+</script>
+</body>
+</html>
