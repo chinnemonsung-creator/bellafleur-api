@@ -421,7 +421,13 @@ app.use((err, req, res, next) => {
   return res.status(500).json({ ok:false, error:'INTERNAL', message: err?.message || 'internal error' });
 });
 
-// ---------- Start ----------
-app.listen(PORT, () => {
+
+// เดิม:
+// app.listen(PORT, () => { ... });
+
+// ใหม่:
+const server = app.listen(PORT, () => {
   console.log(`API listening on http://0.0.0.0:${PORT} (env=${NODE_ENV})`);
 });
+process.on('SIGTERM', () => server.close(() => process.exit(0)));
+process.on('SIGINT',  () => server.close(() => process.exit(0)));
